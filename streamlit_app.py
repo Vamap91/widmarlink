@@ -91,12 +91,21 @@ def get_thumbnail_category(title):
 def extract_video_from_element(element, index):
     """Extrai dados de um elemento HTML"""
     try:
-        # 1. Buscar links do vídeo
+        # 1. Buscar links do vídeo - MUITO mais agressivo
         video_url = ""
         video_id = ""
         
-        all_links = element.find_all('a', href=True)
+        # Primeiro: buscar em TODOS os elementos filhos
+        all_links = element.find_all('a', href=True, recursive=True)
+        
+        # Também buscar no próprio elemento se for um link
+        if element.name == 'a' and element.get('href'):
+            all_links.append(element)
+        
         clip_links = []
+        
+        # Debug: mostrar TODOS os links encontrados
+        debug_links = [link.get('href') for link in all_links[:5]]
         
         # Priorizar links com /clip/
         for link in all_links:
@@ -104,77 +113,155 @@ def extract_video_from_element(element, index):
             if '/clip/' in href or '/stock-footage/clip/' in href:
                 clip_links.append(href)
         
-        # Se não achou, pegar outros links relevantes
+        # Se não achou clips, pegar outros links do Artlist
         if not clip_links:
             for link in all_links:
                 href = link.get('href', '')
-                if any(pattern in href for pattern in ['/stock-footage/', '/video/', '/media/']):
-                    if '/artist/' not in href:  # Evitar links de artista
+                if ('artlist.io' in href or href.startswith('/')) and '/artist/' not in href:
+                    if any(pattern in href for pattern in ['/stock-footage/', '/video/', '/media/']):
                         clip_links.append(href)
+        
+        # Se ainda não achou, aceitar qualquer link que pareça ser de vídeo
+        if not clip_links:
+            for link in all_links:
+                href = link.get('href', '')
+                if href and len(href) > 10:  # Links não muito curtos
+                    clip_links.append(href)
         
         # Processar melhor link
         if clip_links:
-            best_link = clip_links[0]
+            # Priorizar links com /clip/
+            best_link = None
+            for link in clip_links:
+                if '/clip/' in link:
+                    best_link = link
+                    break
+            
+            if not best_link:
+                best_link = clip_links[0]
             
             # Construir URL completa
             if best_link.startswith('/'):
                 video_url = urljoin('https://artlist.io', best_link)
             elif 'artlist.io' in best_link:
                 video_url = best_link
-            else:
+            elif best_link.startswith('http'):
                 video_url = best_link
+            else:
+                video_url = f"https://artlist.io{best_link}" if not best_link.startswith('/') else f"https://artlist.io{best_link}"
             
-            # Extrair ID do final da URL
+            # Extrair ID do final da URL - MAIS agressivo
             if video_url:
-                url_parts = video_url.rstrip('/').split('/')
-                for part in reversed(url_parts):
-                    if part.isdigit() and len(part) >= 4:  # IDs geralmente têm 4+ dígitos
-                        video_id = part
+                # Buscar por qualquer número de 4+ dígitos na URL
+                numbers = re.findall(r'\d{4,}', video_url)
+                if numbers:
+                    video_id = numbers[-1]  # Pegar o último número longo
+                else:
+                    # Se não achou números longos, pegar qualquer número
+                    all_numbers = re.findall(r'\d+', video_url)
+                    if all_numbers:
+                        video_id = all_numbers[-1]
+        
+        # Se não conseguiu ID da URL, usar atributos do elemento
+        if not video_id:
+            for attr in ['data-id', 'data-video-id', 'data-clip-id', 'id']:
+                attr_value = element.get(attr)
+                if attr_value:
+                    # Extrair números do atributo
+                    numbers = re.findall(r'\d+', str(attr_value))
+                    if numbers:
+                        video_id = numbers[-1]
                         break
         
-        # Se não conseguiu ID da URL, gerar um
+        # Último fallback para ID
         if not video_id:
             video_id = f"video_{index}_{int(time.time())}"
         
-        # 2. Buscar título
+        # 2. Buscar título - MAIS agressivo
         title = ""
-        title_selectors = ['h1', 'h2', 'h3', 'h4', '.title', '[class*="title"]', 'span', 'div']
         
-        for selector in title_selectors:
-            try:
-                title_elem = element.select_one(selector)
-                if title_elem:
-                    text = title_elem.get_text(strip=True)
-                    if text and len(text) > 3 and len(text) < 150:
-                        title = text
-                        break
-            except:
-                continue
-        
-        # Se não achou título, tentar extrair da URL
-        if not title and video_url:
+        # Primeiro: tentar extrair da URL se tiver
+        if video_url:
             url_parts = video_url.split('/')
             for part in url_parts:
-                if part and not part.isdigit() and len(part) > 5 and '-' in part:
+                if part and not part.isdigit() and len(part) > 8 and '-' in part:
                     title = part.replace('-', ' ').title()
                     break
         
-        # Se ainda não tem título, usar alt da imagem
+        # Se não achou na URL, buscar no HTML
+        if not title:
+            title_selectors = ['h1', 'h2', 'h3', 'h4', '.title', '[class*="title"]', 'span', 'div', 'p']
+            
+            for selector in title_selectors:
+                try:
+                    title_elems = element.select(selector)
+                    for elem in title_elems:
+                        text = elem.get_text(strip=True)
+                        if text and len(text) > 5 and len(text) < 200:
+                            title = text
+                            break
+                    if title:
+                        break
+                except:
+                    continue
+        
+        # Último fallback: alt da imagem
         if not title:
             img = element.find('img')
             if img and img.get('alt'):
                 title = img.get('alt').strip()
         
-        # 3. Buscar thumbnail
+        # 3. Buscar thumbnail - mais opções
         thumbnail_url = ""
-        img_elem = element.find('img')
-        if img_elem:
-            thumbnail_url = (img_elem.get('src') or 
-                           img_elem.get('data-src') or 
-                           img_elem.get('data-original') or
-                           "")
+        
+        # Buscar todas as imagens no elemento
+        all_imgs = element.find_all('img')
+        for img in all_imgs:
+            src = (img.get('src') or 
+                   img.get('data-src') or 
+                   img.get('data-original') or
+                   img.get('data-lazy') or
+                   "")
+            if src:
+                thumbnail_url = src
+                break
         
         if thumbnail_url and thumbnail_url.startswith('/'):
+            thumbnail_url = urljoin('https://artlist.io', thumbnail_url)
+        
+        # Se não encontrou thumbnail real, gerar uma
+        if not thumbnail_url:
+            thumbnail_url = generate_smart_thumbnail(title, video_url, video_id)
+        
+        # Debug info para o primeiro elemento
+        debug_info = {
+            'all_links_found': debug_links,
+            'clip_links': clip_links[:3],
+            'selected_url': video_url,
+            'extracted_id': video_id,
+            'title_source': 'URL' if video_url and title else 'HTML'
+        }
+        
+        result = {
+            'ID': str(video_id),
+            'Source': 'artlist.io',
+            'Title': title,
+            'Description': f"Links encontrados: {len(all_links)}, Clip links: {len(clip_links)}",
+            'Video URL': video_url,
+            'Thumbnail URL': thumbnail_url,
+            'Language': 'en'
+        }
+        
+        # Debug para o primeiro elemento
+        if index == 0:
+            st.info("🔍 **Debug do primeiro elemento:**")
+            st.json(debug_info)
+        
+        return result
+        
+    except Exception as e:
+        st.error(f"Erro ao extrair elemento {index}: {e}")
+        return None
             thumbnail_url = urljoin('https://artlist.io', thumbnail_url)
         
         # Se não encontrou thumbnail, gerar uma
@@ -240,8 +327,134 @@ def extract_with_requests(url, max_videos=20):
         st.info(f"📄 Página carregada. Tamanho: {len(response.text)} caracteres")
         
         # Debug: mostrar parte do HTML
-        with st.expander("🔧 Debug - HTML (primeiros 1000 chars)"):
-            st.text(response.text[:1000])
+        with st.expander("🔧 Debug - HTML (primeiros 2000 chars)"):
+            st.text(response.text[:2000])
+        
+        # Debug: procurar por padrões específicos no HTML
+        clip_urls_in_html = re.findall(r'href="([^"]*(?:/clip/|/stock-footage/)[^"]*)"', response.text)
+        
+        # 🆕 BUSCAR ESPECIFICAMENTE POR CLIP IDs na página
+        clip_ids_in_html = re.findall(r'Clip ID["\s:]*(\d{4,})', response.text, re.IGNORECASE)
+        if not clip_ids_in_html:
+            # Buscar por outros padrões de ID
+            clip_ids_in_html = re.findall(r'clip["\s_-]*id["\s:]*(\d{4,})', response.text, re.IGNORECASE)
+        if not clip_ids_in_html:
+            # Buscar por IDs em data attributes
+            clip_ids_in_html = re.findall(r'data-id["\s:]*["\'](\d{4,})["\']', response.text)
+        if not clip_ids_in_html:
+            # Buscar por qualquer sequência de 6-8 dígitos (padrão comum de IDs do Artlist)
+            clip_ids_in_html = re.findall(r'\b(\d{6,8})\b', response.text)
+        
+        st.info(f"🆔 IDs de clip encontrados: {len(clip_ids_in_html)}")
+        if clip_ids_in_html:
+            st.success("✅ IDs encontrados!")
+            for i, clip_id in enumerate(set(clip_ids_in_html[:5])):  # Remove duplicatas
+                st.write(f"   {i+1}. ID: {clip_id}")
+        
+        st.info(f"🔍 URLs de clip encontradas no HTML: {len(clip_urls_in_html)}")
+        
+        if clip_urls_in_html:
+            st.success("✅ Links de vídeo encontrados no HTML!")
+            for i, url in enumerate(clip_urls_in_html[:3]):
+                st.write(f"   {i+1}. {url}")
+        else:
+            st.warning("⚠️ Nenhum link de clip encontrado no HTML - pode ser carregamento dinâmico")
+        
+        # 🆕 Se encontrou IDs e URLs, combinar os dados
+        if clip_ids_in_html and clip_urls_in_html:
+            st.info("🎯 Combinando IDs e URLs encontrados...")
+            unique_ids = list(set(clip_ids_in_html))[:max_videos]
+            
+            for i, clip_id in enumerate(unique_ids):
+                # Tentar encontrar URL correspondente ou usar a primeira disponível
+                corresponding_url = None
+                for url in clip_urls_in_html:
+                    if clip_id in url:
+                        corresponding_url = url
+                        break
+                
+                if not corresponding_url and clip_urls_in_html:
+                    corresponding_url = clip_urls_in_html[min(i, len(clip_urls_in_html)-1)]
+                
+                # Construir URL completa
+                if corresponding_url:
+                    if corresponding_url.startswith('/'):
+                        full_url = urljoin('https://artlist.io', corresponding_url)
+                    else:
+                        full_url = corresponding_url
+                else:
+                    # Construir URL baseada no padrão do Artlist
+                    full_url = f"https://artlist.io/stock-footage/clip/video-{clip_id}/{clip_id}"
+                
+                # Extrair título da URL ou criar um baseado no ID
+                title = ""
+                if corresponding_url:
+                    url_parts = corresponding_url.split('/')
+                    for part in url_parts:
+                        if part and not part.isdigit() and len(part) > 5 and '-' in part:
+                            title = part.replace('-', ' ').title()
+                            break
+                
+                if not title:
+                    title = f"Artlist Clip {clip_id}"
+                
+                video_data = {
+                    'ID': str(clip_id),
+                    'Source': 'artlist.io',
+                    'Title': title,
+                    'Description': f"Clip extraído do HTML - ID: {clip_id}",
+                    'Video URL': full_url,
+                    'Thumbnail URL': generate_smart_thumbnail(title, full_url, clip_id),
+                    'Language': 'en'
+                }
+                
+                df_data.append(video_data)
+                st.success(f"✅ Vídeo {len(df_data)}: {title} (ID: {clip_id})")
+            
+            return df_data
+        
+        # Se só encontrou URLs (método anterior)
+        elif clip_urls_in_html:
+            st.info("🎯 Criando elementos baseados nas URLs encontradas...")
+            for i, url in enumerate(clip_urls_in_html[:max_videos]):
+                # Extrair ID da URL
+                url_parts = url.rstrip('/').split('/')
+                video_id = None
+                for part in reversed(url_parts):
+                    if part.isdigit() and len(part) >= 4:
+                        video_id = part
+                        break
+                
+                if not video_id:
+                    video_id = f"extracted_{i}"
+                
+                # Extrair título da URL
+                title = ""
+                for part in url_parts:
+                    if part and not part.isdigit() and len(part) > 5 and '-' in part:
+                        title = part.replace('-', ' ').title()
+                        break
+                
+                # Construir URL completa
+                if url.startswith('/'):
+                    full_url = urljoin('https://artlist.io', url)
+                else:
+                    full_url = url
+                
+                video_data = {
+                    'ID': str(video_id),
+                    'Source': 'artlist.io',
+                    'Title': title,
+                    'Description': f"Extraído da URL: {full_url}",
+                    'Video URL': full_url,
+                    'Thumbnail URL': generate_smart_thumbnail(title, full_url, video_id),
+                    'Language': 'en'
+                }
+                
+                df_data.append(video_data)
+                st.success(f"✅ Vídeo {len(df_data)}: {title} (ID: {video_id})")
+            
+            return df_data
         
         # Seletores para encontrar elementos de vídeo
         video_selectors = [
@@ -253,7 +466,10 @@ def extract_with_requests(url, max_videos=20):
             '[class*="video"]',
             'div:has(img):has(a)',
             'article',
-            'div[class*="item"]'
+            'div[class*="item"]',
+            # Novos seletores mais específicos
+            'a[href*="/clip/"]',  # Links diretos para clips
+            'a[href*="/stock-footage/clip/"]',  # Links específicos
         ]
         
         video_elements = []
@@ -278,14 +494,28 @@ def extract_with_requests(url, max_videos=20):
         # Fallback se não encontrou nada
         if not video_elements:
             st.warning("⚠️ Usando fallback: procurando todos os divs com links...")
-            all_divs = soup.find_all(['div', 'article'])
+            all_divs = soup.find_all(['div', 'article', 'section', 'li'])
             video_elements = []
             
             for div in all_divs:
-                if div.find('a', href=True) or div.find('img'):
-                    video_elements.append(div)
+                links = div.find_all('a', href=True)
+                for link in links:
+                    href = link.get('href', '')
+                    if '/clip/' in href or '/stock-footage/' in href:
+                        video_elements.append(div)
+                        break
+                
                 if len(video_elements) >= max_videos * 2:
                     break
+            
+            # Se ainda não encontrou, pegar divs com imagens
+            if not video_elements:
+                all_elements = soup.find_all(['div', 'article'])
+                for elem in all_elements:
+                    if elem.find('img') or elem.find('a'):
+                        video_elements.append(elem)
+                    if len(video_elements) >= max_videos:
+                        break
         
         st.info(f"🎯 Processando {len(video_elements)} elementos encontrados...")
         
