@@ -182,7 +182,113 @@ def extract_with_requests(url, max_videos=20):
         st.error(f"Traceback: {traceback.format_exc()}")
         return []
 
-def extract_video_from_element(element, index, soup=None):
+def generate_thumbnail_from_title(title, video_id):
+    """Gera thumbnail baseado no título do vídeo"""
+    if not title:
+        return generate_placeholder_thumbnail()
+    
+    try:
+        # Extrair palavras-chave do título
+        keywords = extract_keywords_from_title(title)
+        
+        # Tentar buscar imagem no Unsplash
+        unsplash_url = get_unsplash_image(keywords)
+        if unsplash_url:
+            return unsplash_url
+        
+        # Fallback: usar Picsum (imagens aleatórias)
+        return f"https://picsum.photos/400/225?random={hash(video_id) % 1000}"
+        
+    except Exception as e:
+        st.warning(f"Erro ao gerar thumbnail: {e}")
+        return generate_placeholder_thumbnail()
+
+def extract_keywords_from_title(title):
+    """Extrai palavras-chave relevantes do título"""
+    # Remover palavras comuns e caracteres especiais
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'new', 'old'}
+    
+    # Limpar título
+    clean_title = re.sub(r'[^\w\s]', ' ', title.lower())
+    words = [word.strip() for word in clean_title.split() if word.strip() and word not in stop_words]
+    
+    # Pegar as 2-3 palavras mais relevantes
+    relevant_words = words[:3]
+    
+    return ' '.join(relevant_words) if relevant_words else 'nature'
+
+def get_unsplash_image(keywords):
+    """Busca imagem no Unsplash baseada nas palavras-chave"""
+    try:
+        # URL da API do Unsplash (acesso público limitado)
+        url = f"https://source.unsplash.com/400x225/?{keywords.replace(' ', ',')}"
+        
+        # Testar se a URL responde
+        response = requests.head(url, timeout=5)
+        if response.status_code == 200:
+            return url
+        
+    except:
+        pass
+    
+    return None
+
+def generate_placeholder_thumbnail():
+    """Gera thumbnail placeholder"""
+    return "https://via.placeholder.com/400x225/4299ff/ffffff?text=Artlist+Video"
+
+def generate_smart_thumbnail(title, video_url, video_id):
+    """Gera thumbnail inteligente baseado no contexto"""
+    
+    # 1. Tentar extrair da própria URL do vídeo
+    if video_url:
+        try:
+            # Algumas URLs do Artlist têm padrões previsíveis para thumbnails
+            if 'artlist.io' in video_url:
+                # Tentar construir URL de thumbnail baseada na URL do vídeo
+                video_path = video_url.replace('https://artlist.io/', '')
+                
+                # Padrões comuns de thumbnail no Artlist
+                possible_thumbnails = [
+                    f"https://artlist.io/thumb/{video_path.split('/')[-1]}.jpg",
+                    f"https://artlist.io/thumbnails/{video_path.split('/')[-1]}.jpg",
+                    f"https://artlist.io/images/{video_path.split('/')[-1]}.jpg"
+                ]
+                
+                for thumb_url in possible_thumbnails:
+                    try:
+                        response = requests.head(thumb_url, timeout=3)
+                        if response.status_code == 200:
+                            return thumb_url
+                    except:
+                        continue
+        except:
+            pass
+    
+    # 2. Gerar baseado no título
+    return generate_thumbnail_from_title(title, video_id)
+
+# Categoria de thumbnails baseada no título
+def get_thumbnail_category(title):
+    """Determina categoria da thumbnail baseada no título"""
+    title_lower = title.lower()
+    
+    categories = {
+        'nature': ['safari', 'africa', 'wildlife', 'animal', 'forest', 'tree', 'mountain', 'ocean', 'beach'],
+        'city': ['urban', 'city', 'building', 'street', 'downtown', 'skyline'],
+        'people': ['person', 'people', 'man', 'woman', 'child', 'family', 'group'],
+        'business': ['office', 'meeting', 'work', 'business', 'corporate', 'professional'],
+        'technology': ['tech', 'computer', 'digital', 'code', 'data', 'AI', 'robot'],
+        'food': ['food', 'cooking', 'kitchen', 'restaurant', 'meal', 'chef'],
+        'travel': ['travel', 'vacation', 'tourism', 'destination', 'journey'],
+        'abstract': ['abstract', 'pattern', 'texture', 'background', 'design']
+    }
+    
+    for category, keywords in categories.items():
+        if any(keyword in title_lower for keyword in keywords):
+            return category
+    
+    return 'nature'  # padrão
     """Extrai dados de um elemento HTML"""
     try:
         # ID - mais variações
@@ -327,6 +433,10 @@ def extract_video_from_element(element, index, soup=None):
         if thumbnail_url and thumbnail_url.startswith('/'):
             thumbnail_url = urljoin('https://artlist.io', thumbnail_url)
         
+        # 🆕 Se não encontrou thumbnail, gerar uma inteligente
+        if not thumbnail_url:
+            thumbnail_url = generate_smart_thumbnail(title, video_url, video_id)
+        
         # Idioma - detecção melhorada
         language = "en"
         text_content = f"{title} {description}".lower()
@@ -340,13 +450,16 @@ def extract_video_from_element(element, index, soup=None):
         if any(keyword in text_content for keyword in pt_keywords):
             language = "pt"
         
-        # Debug info
+        # Debug info - incluir informações sobre URLs encontradas
         debug_info = {
             'element_tag': element.name,
             'element_classes': element.get('class', []),
             'title_candidates': title_candidates[:3],
             'desc_candidates': desc_candidates[:2] if desc_candidates else [],
-            'links_found': len(links),
+            'all_urls_found': debug_urls,
+            'selected_video_url': video_url,
+            'extracted_id': video_id,
+            'links_found': len(all_links),
             'has_img': bool(img_elem)
         }
         
@@ -514,12 +627,27 @@ def main():
             help="Máximo de vídeos (limitado no cloud)"
         )
     
-    # Método de extração
-    method = st.radio(
-        "Método de extração:",
-        ["Requests + BeautifulSoup (Recomendado)", "Selenium (Experimental)"],
-        help="Requests é mais estável no Streamlit Cloud"
-    )
+    # Método de extração e opções de thumbnail
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        method = st.radio(
+            "Método de extração:",
+            ["Requests + BeautifulSoup (Recomendado)", "Selenium (Experimental)"],
+            help="Requests é mais estável no Streamlit Cloud"
+        )
+    
+    with col2:
+        thumbnail_option = st.selectbox(
+            "Thumbnails automáticas:",
+            [
+                "Gerar baseada no título",
+                "Usar placeholder padrão", 
+                "Buscar no Unsplash",
+                "Imagens aleatórias (Picsum)"
+            ],
+            help="Como gerar thumbnails quando não encontradas"
+        )
     
     if st.button("🚀 Extrair Vídeos", type="primary"):
         if not url_input:
@@ -548,6 +676,19 @@ def main():
                 else:
                     st.error("Selenium não disponível. Use o método Requests.")
                     return
+        
+        # Pós-processar thumbnails se necessário
+        if df_data and thumbnail_option != "Gerar baseada no título":
+            with st.spinner("🎨 Gerando thumbnails..."):
+                for item in df_data:
+                    if not item.get('Thumbnail URL'):
+                        if thumbnail_option == "Usar placeholder padrão":
+                            item['Thumbnail URL'] = generate_placeholder_thumbnail()
+                        elif thumbnail_option == "Buscar no Unsplash":
+                            item['Thumbnail URL'] = get_unsplash_image(item.get('Title', 'video')) or generate_placeholder_thumbnail()
+                        elif thumbnail_option == "Imagens aleatórias (Picsum)":
+                            seed = abs(hash(item.get('ID', 'default'))) % 1000
+                            item['Thumbnail URL'] = f"https://picsum.photos/400/225?random={seed}"
         
         if df_data:
             st.success(f"✅ {len(df_data)} vídeos extraídos!")
