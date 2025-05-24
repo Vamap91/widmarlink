@@ -227,6 +227,7 @@ def extract_video_from_element(element, index):
                 break
         
         if thumbnail_url and thumbnail_url.startswith('/'):
+        if thumbnail_url and thumbnail_url.startswith('/'):
             thumbnail_url = urljoin('https://artlist.io', thumbnail_url)
         
         # Se não encontrou thumbnail real, gerar uma
