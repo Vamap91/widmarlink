@@ -62,112 +62,260 @@ def extract_with_requests(url, max_videos=20):
         'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip, deflate',
         'Connection': 'keep-alive',
+        'Referer': 'https://artlist.io/',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin'
     }
     
     df_data = []
     
     try:
+        st.info("🔍 Fazendo requisição para o Artlist...")
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
+        st.info(f"📄 Página carregada. Tamanho: {len(response.text)} caracteres")
         
-        # Procurar por diferentes padrões de elementos de vídeo
+        # Debug: mostrar parte do HTML
+        with st.expander("🔧 Debug - HTML (primeiros 1000 chars)"):
+            st.text(response.text[:1000])
+        
+        # Seletores mais específicos do Artlist
         video_selectors = [
-            '[data-testid*="video"]',
+            # Seletores específicos do Artlist
+            '[data-testid*="clip"]',
+            '[data-testid*="video"]', 
+            '[class*="ClipCard"]',
+            '[class*="VideoCard"]',
+            '[class*="MediaCard"]',
+            'article[class*="clip"]',
+            'div[class*="clip"]',
+            # Seletores genéricos
             '.video-item',
-            '.clip-item', 
+            '.clip-item',
             '[class*="video"]',
             '[class*="clip"]',
             'article',
-            '.grid-item'
+            '.grid-item',
+            # Fallback para qualquer div com imagem
+            'div:has(img)',
+            'section:has(img)'
         ]
         
         video_elements = []
+        elements_found = {}
+        
         for selector in video_selectors:
-            elements = soup.select(selector)
-            if elements:
-                video_elements.extend(elements[:max_videos])
-                break
+            try:
+                elements = soup.select(selector)
+                elements_found[selector] = len(elements)
+                if elements and len(elements) > 0:
+                    st.info(f"✅ Encontrados {len(elements)} elementos com seletor: {selector}")
+                    video_elements = elements[:max_videos]
+                    break
+            except Exception as e:
+                st.warning(f"❌ Erro com seletor {selector}: {e}")
+                continue
+        
+        # Debug: mostrar seletores testados
+        with st.expander("🔧 Debug - Seletores testados"):
+            for selector, count in elements_found.items():
+                st.write(f"- `{selector}`: {count} elementos")
         
         if not video_elements:
-            # Fallback: procurar por qualquer elemento com imagem
-            video_elements = soup.find_all(['div', 'article', 'section'], limit=max_videos)
-            video_elements = [el for el in video_elements if el.find('img')]
+            st.warning("⚠️ Usando fallback: procurando divs com imagens...")
+            # Fallback mais agressivo
+            all_divs = soup.find_all(['div', 'article', 'section'])
+            video_elements = []
+            for div in all_divs:
+                if div.find('img') or div.find('video') or 'video' in str(div.get('class', [])).lower():
+                    video_elements.append(div)
+                if len(video_elements) >= max_videos:
+                    break
+        
+        st.info(f"🎯 Processando {len(video_elements)} elementos encontrados...")
         
         for i, element in enumerate(video_elements[:max_videos]):
-            video_data = extract_video_from_element(element, i)
+            video_data = extract_video_from_element(element, i, soup)
             if video_data:
                 df_data.append(video_data)
+                st.success(f"✅ Vídeo {i+1} extraído: {video_data.get('Title', 'Sem título')}")
+            else:
+                st.warning(f"⚠️ Não foi possível extrair dados do elemento {i+1}")
         
         return df_data
         
     except Exception as e:
         st.error(f"Erro na extração com requests: {e}")
+        import traceback
+        st.error(f"Traceback: {traceback.format_exc()}")
         return []
 
-def extract_video_from_element(element, index):
+def extract_video_from_element(element, index, soup=None):
     """Extrai dados de um elemento HTML"""
     try:
-        # ID
+        # ID - mais variações
         video_id = (element.get('data-id') or 
-                   element.get('data-video-id') or 
+                   element.get('data-video-id') or
+                   element.get('data-clip-id') or
+                   element.get('data-testid') or
                    element.get('id') or 
                    f"video_{index}_{int(time.time())}")
         
-        # Título
-        title_selectors = ['h1', 'h2', 'h3', 'h4', '.title', '[class*="title"]']
+        # Título - seletores mais abrangentes
+        title_selectors = [
+            'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            '.title', '[class*="title" i]', '[class*="Title" i]',
+            '.name', '[class*="name" i]', '[class*="Name" i]',
+            '.label', '[class*="label" i]',
+            'span[class*="text"]', 'div[class*="text"]',
+            'p', 'span', 'div'
+        ]
+        
         title = ""
+        title_candidates = []
+        
         for selector in title_selectors:
-            title_elem = element.select_one(selector)
-            if title_elem and title_elem.get_text(strip=True):
-                title = title_elem.get_text(strip=True)
-                break
+            try:
+                title_elems = element.select(selector)
+                for elem in title_elems:
+                    text = elem.get_text(strip=True)
+                    if text and len(text) > 3 and len(text) < 200:  # Filtrar textos muito curtos/longos
+                        title_candidates.append(text)
+            except:
+                continue
         
-        # Descrição
-        desc_selectors = ['.description', '[class*="description"]', 'p']
+        # Pegar o primeiro candidato válido
+        if title_candidates:
+            title = title_candidates[0]
+        
+        # Se não achou título, tentar alt text das imagens
+        if not title:
+            try:
+                img = element.find('img')
+                if img and img.get('alt'):
+                    title = img.get('alt').strip()
+            except:
+                pass
+        
+        # Descrição - buscar em vários lugares
+        desc_selectors = [
+            '.description', '[class*="description" i]',
+            '.summary', '[class*="summary" i]',
+            '.excerpt', '[class*="excerpt" i]',
+            'p', '.text', '[class*="text" i]'
+        ]
+        
         description = ""
+        desc_candidates = []
+        
         for selector in desc_selectors:
-            desc_elem = element.select_one(selector)
-            if desc_elem and desc_elem.get_text(strip=True) != title:
-                description = desc_elem.get_text(strip=True)
-                break
+            try:
+                desc_elems = element.select(selector)
+                for elem in desc_elems:
+                    text = elem.get_text(strip=True)
+                    if text and text != title and len(text) > 10:
+                        desc_candidates.append(text)
+            except:
+                continue
         
-        # URL do vídeo
+        if desc_candidates:
+            description = desc_candidates[0][:500]  # Limitar tamanho
+        
+        # URL do vídeo - buscar links
         video_url = ""
-        link_elem = element.find('a', href=True)
-        if link_elem:
-            href = link_elem['href']
-            if href.startswith('/'):
-                video_url = urljoin('https://artlist.io', href)
-            elif 'artlist.io' in href:
-                video_url = href
         
-        # Thumbnail
+        # Primeiro, tentar links diretos
+        links = element.find_all('a', href=True)
+        for link in links:
+            href = link.get('href', '')
+            if href:
+                if href.startswith('/'):
+                    video_url = urljoin('https://artlist.io', href)
+                elif 'artlist.io' in href:
+                    video_url = href
+                elif href.startswith('http'):
+                    video_url = href
+                
+                if video_url:
+                    break
+        
+        # Se não achou, tentar data attributes
+        if not video_url:
+            for attr in ['data-url', 'data-link', 'data-href']:
+                url_attr = element.get(attr)
+                if url_attr:
+                    if url_attr.startswith('/'):
+                        video_url = urljoin('https://artlist.io', url_attr)
+                    else:
+                        video_url = url_attr
+                    break
+        
+        # Thumbnail - buscar imagens
         thumbnail_url = ""
+        
+        # Buscar img tags
         img_elem = element.find('img')
         if img_elem:
-            thumbnail_url = img_elem.get('src') or img_elem.get('data-src') or ""
-            if thumbnail_url and thumbnail_url.startswith('/'):
-                thumbnail_url = urljoin('https://artlist.io', thumbnail_url)
+            thumbnail_url = (img_elem.get('src') or 
+                           img_elem.get('data-src') or 
+                           img_elem.get('data-original') or
+                           img_elem.get('srcset', '').split(',')[0].strip().split(' ')[0] or
+                           "")
         
-        # Idioma básico
+        # Se não achou img, buscar background-image
+        if not thumbnail_url:
+            style = element.get('style', '')
+            if 'background-image' in style:
+                import re
+                match = re.search(r'background-image:\s*url\(["\']?([^"\']+)["\']?\)', style)
+                if match:
+                    thumbnail_url = match.group(1)
+        
+        # Ajustar URLs relativas
+        if thumbnail_url and thumbnail_url.startswith('/'):
+            thumbnail_url = urljoin('https://artlist.io', thumbnail_url)
+        
+        # Idioma - detecção melhorada
         language = "en"
         text_content = f"{title} {description}".lower()
-        if any(word in text_content for word in ['português', 'brasil', 'pt-br']):
+        
+        # Palavras-chave para detecção de idioma
+        pt_keywords = [
+            'português', 'brasil', 'pt-br', 'brasileiro', 'lusitano',
+            'música', 'vídeo', 'imagem', 'som', 'áudio'
+        ]
+        
+        if any(keyword in text_content for keyword in pt_keywords):
             language = "pt"
         
-        return {
-            'ID': video_id,
+        # Debug info
+        debug_info = {
+            'element_tag': element.name,
+            'element_classes': element.get('class', []),
+            'title_candidates': title_candidates[:3],
+            'desc_candidates': desc_candidates[:2] if desc_candidates else [],
+            'links_found': len(links),
+            'has_img': bool(img_elem)
+        }
+        
+        result = {
+            'ID': str(video_id),
             'Source': 'artlist.io',
             'Title': title,
             'Description': description,
             'Video URL': video_url,
             'Thumbnail URL': thumbnail_url,
-            'Language': language
+            'Language': language,
+            '_debug': debug_info  # Para debug, será removido depois
         }
         
+        return result
+        
     except Exception as e:
+        st.error(f"Erro ao extrair elemento {index}: {e}")
         return None
 
 def extract_with_selenium(driver, url, max_videos):
@@ -379,19 +527,34 @@ def main():
                     "application/json"
                 )
             
-            # Amostra
+            # Amostra com debug
             if len(df_data) > 0:
-                st.subheader("📋 Amostra")
+                st.subheader("📋 Amostra dos Dados")
                 sample = df_data[0]
+                
                 col1, col2 = st.columns([1, 2])
                 with col1:
                     if sample['Thumbnail URL']:
                         try:
                             st.image(sample['Thumbnail URL'], width=200)
                         except:
-                            st.write("Thumbnail indisponível")
+                            st.write("❌ Thumbnail indisponível")
+                    else:
+                        st.write("❌ Thumbnail não encontrada")
+                
                 with col2:
-                    st.json(sample)
+                    # Remover debug info antes de mostrar
+                    clean_sample = {k: v for k, v in sample.items() if not k.startswith('_')}
+                    st.json(clean_sample)
+                
+                # Mostrar info de debug se disponível
+                if '_debug' in sample:
+                    with st.expander("🔧 Debug Info"):
+                        st.json(sample['_debug'])
+                
+                # Limpar debug info dos dados finais
+                for item in df_data:
+                    item.pop('_debug', None)
         
         else:
             st.warning("❌ Nenhum vídeo encontrado")
