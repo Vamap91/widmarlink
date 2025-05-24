@@ -84,7 +84,7 @@ def extract_with_requests(url, max_videos=20):
         
         # Seletores mais específicos do Artlist
         video_selectors = [
-            # Seletores específicos do Artlist
+            # Seletores específicos do Artlist (baseado no debug)
             '[data-testid*="clip"]',
             '[data-testid*="video"]', 
             '[class*="ClipCard"]',
@@ -92,16 +92,23 @@ def extract_with_requests(url, max_videos=20):
             '[class*="MediaCard"]',
             'article[class*="clip"]',
             'div[class*="clip"]',
+            # Novos seletores baseados na estrutura real
+            'div[class*="grid"] > div',
+            'div[class*="list"] > div', 
+            'div[class*="item"]',
+            'div[role="article"]',
+            'div[role="listitem"]',
+            # Seletores por conteúdo
+            'div:has(> a[href*="/stock-footage/"])',
+            'div:has(> a[href*="/clip/"])',
+            'div:has(img)',
             # Seletores genéricos
             '.video-item',
             '.clip-item',
             '[class*="video"]',
             '[class*="clip"]',
             'article',
-            '.grid-item',
-            # Fallback para qualquer div com imagem
-            'div:has(img)',
-            'section:has(img)'
+            '.grid-item'
         ]
         
         video_elements = []
@@ -126,24 +133,46 @@ def extract_with_requests(url, max_videos=20):
         
         if not video_elements:
             st.warning("⚠️ Usando fallback: procurando divs com imagens...")
-            # Fallback mais agressivo
-            all_divs = soup.find_all(['div', 'article', 'section'])
+            # Fallback mais agressivo - buscar qualquer div que tenha link para artlist
+            all_divs = soup.find_all(['div', 'article', 'section', 'li'])
             video_elements = []
+            
             for div in all_divs:
-                if div.find('img') or div.find('video') or 'video' in str(div.get('class', [])).lower():
+                # Verificar se tem imagem OU link para vídeo OU texto que parece título
+                has_content = (
+                    div.find('img') or 
+                    div.find('video') or
+                    div.find('a', href=lambda x: x and ('/stock-footage/' in x or '/clip/' in x)) or
+                    (div.get_text(strip=True) and len(div.get_text(strip=True)) > 10)
+                )
+                
+                if has_content:
                     video_elements.append(div)
-                if len(video_elements) >= max_videos:
+                    
+                if len(video_elements) >= max_videos * 2:  # Pegar mais elementos para filtrar depois
                     break
+        
+        # Se ainda não encontrou nada, pegar todos os divs com qualquer conteúdo
+        if not video_elements:
+            st.warning("⚠️ Fallback extremo: analisando todos os elementos...")
+            all_elements = soup.find_all(['div', 'section', 'article'])
+            video_elements = [el for el in all_elements if el.get_text(strip=True)][:max_videos * 3]
         
         st.info(f"🎯 Processando {len(video_elements)} elementos encontrados...")
         
-        for i, element in enumerate(video_elements[:max_videos]):
+        processed_count = 0
+        for i, element in enumerate(video_elements[:max_videos * 2]):  # Processar mais elementos
             video_data = extract_video_from_element(element, i, soup)
-            if video_data:
+            if video_data and (video_data.get('Title') or video_data.get('Video URL') or video_data.get('Thumbnail URL')):
                 df_data.append(video_data)
-                st.success(f"✅ Vídeo {i+1} extraído: {video_data.get('Title', 'Sem título')}")
+                processed_count += 1
+                st.success(f"✅ Vídeo {processed_count} extraído: {video_data.get('Title', 'Sem título')[:50]}...")
+                
+                if processed_count >= max_videos:  # Parar quando atingir o limite desejado
+                    break
             else:
-                st.warning(f"⚠️ Não foi possível extrair dados do elemento {i+1}")
+                if i < 5:  # Mostrar debug só dos primeiros elementos
+                    st.warning(f"⚠️ Elemento {i+1} não teve dados válidos extraídos")
         
         return df_data
         
@@ -253,26 +282,46 @@ def extract_video_from_element(element, index, soup=None):
                         video_url = url_attr
                     break
         
-        # Thumbnail - buscar imagens
+        # Thumbnail - buscar imagens com mais variações
         thumbnail_url = ""
         
-        # Buscar img tags
+        # 1. Buscar img tags com diferentes atributos
         img_elem = element.find('img')
         if img_elem:
             thumbnail_url = (img_elem.get('src') or 
                            img_elem.get('data-src') or 
                            img_elem.get('data-original') or
+                           img_elem.get('data-lazy') or
+                           img_elem.get('data-srcset') or
                            img_elem.get('srcset', '').split(',')[0].strip().split(' ')[0] or
                            "")
         
-        # Se não achou img, buscar background-image
+        # 2. Se não achou img, buscar picture > source
         if not thumbnail_url:
-            style = element.get('style', '')
-            if 'background-image' in style:
-                import re
-                match = re.search(r'background-image:\s*url\(["\']?([^"\']+)["\']?\)', style)
-                if match:
-                    thumbnail_url = match.group(1)
+            picture = element.find('picture')
+            if picture:
+                source = picture.find('source')
+                if source:
+                    thumbnail_url = source.get('srcset', '').split(',')[0].strip().split(' ')[0]
+        
+        # 3. Buscar background-image em qualquer elemento filho
+        if not thumbnail_url:
+            for child in element.find_all():
+                style = child.get('style', '')
+                if 'background-image' in style:
+                    import re
+                    match = re.search(r'background-image:\s*url\(["\']?([^"\']+)["\']?\)', style)
+                    if match:
+                        thumbnail_url = match.group(1)
+                        break
+        
+        # 4. Buscar em data attributes relacionados a imagem
+        if not thumbnail_url:
+            for attr in ['data-bg', 'data-background', 'data-image', 'data-thumb', 'data-poster']:
+                thumb_attr = element.get(attr)
+                if thumb_attr:
+                    thumbnail_url = thumb_attr
+                    break
         
         # Ajustar URLs relativas
         if thumbnail_url and thumbnail_url.startswith('/'):
@@ -451,7 +500,8 @@ def main():
     with col1:
         url_input = st.text_input(
             "URL do Artlist:",
-            value="https://artlist.io/stock-footage/search",
+            value="",
+            placeholder="Cole aqui a URL do Artlist (ex: https://artlist.io/stock-footage/search)",
             help="URL da página de busca do Artlist"
         )
     
@@ -473,8 +523,17 @@ def main():
     
     if st.button("🚀 Extrair Vídeos", type="primary"):
         if not url_input:
-            st.error("Insira uma URL válida")
+            st.error("⚠️ Insira uma URL válida do Artlist")
+            st.info("💡 Exemplo: https://artlist.io/stock-footage/search?...")
             return
+        
+        # Validar URL
+        if 'artlist.io' not in url_input:
+            st.error("❌ A URL deve ser do domínio artlist.io")
+            return
+        
+        # Mostrar URL que será processada
+        st.info(f"🌐 Processando URL: {url_input}")
         
         with st.spinner("Extraindo dados..."):
             if method.startswith("Requests"):
