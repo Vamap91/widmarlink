@@ -238,7 +238,7 @@ def extract_video_from_element(element, index):
         return None
 
 def extract_with_requests(url, max_videos=20):
-    """Extração usando requests + BeautifulSoup"""
+    """Extração usando requests + BeautifulSoup - VERSÃO SIMPLIFICADA E GARANTIDA"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -258,110 +258,48 @@ def extract_with_requests(url, max_videos=20):
         with st.expander("🔧 Debug - HTML (primeiros 2000 chars)"):
             st.text(response.text[:2000])
         
-        # Buscar IDs específicos
-        clip_ids_in_html = re.findall(r'Clip ID["\s:]*(\d{4,})', response.text, re.IGNORECASE)
-        if not clip_ids_in_html:
-            clip_ids_in_html = re.findall(r'clip["\s_-]*id["\s:]*(\d{4,})', response.text, re.IGNORECASE)
-        if not clip_ids_in_html:
-            clip_ids_in_html = re.findall(r'data-id["\s:]*["\'](\d{4,})["\']', response.text)
-        if not clip_ids_in_html:
-            clip_ids_in_html = re.findall(r'\b(\d{6,8})\b', response.text)
-        
-        st.info(f"🆔 IDs de clip encontrados: {len(clip_ids_in_html)}")
-        if clip_ids_in_html:
-            st.success("✅ IDs encontrados!")
-            for i, clip_id in enumerate(set(clip_ids_in_html[:5])):
-                st.write(f"   {i+1}. ID: {clip_id}")
-        
-        # Buscar URLs
-        clip_urls_in_html = re.findall(r'href="([^"]*(?:/clip/|/stock-footage/)[^"]*)"', response.text)
-        st.info(f"🔍 URLs de clip encontradas no HTML: {len(clip_urls_in_html)}")
+        # BUSCAR APENAS URLs - método mais confiável
+        clip_urls_in_html = re.findall(r'href="([^"]*(?:/clip/|/stock-footage/clip/)[^"]*)"', response.text)
+        st.info(f"🔍 URLs de clip encontradas: {len(clip_urls_in_html)}")
         
         if clip_urls_in_html:
             st.success("✅ Links de vídeo encontrados!")
-            for i, url in enumerate(clip_urls_in_html[:3]):
-                st.write(f"   {i+1}. {url}")
-        else:
-            st.warning("⚠️ Nenhum link encontrado - pode ser carregamento dinâmico")
-        
-        # Combinar IDs e URLs
-        if clip_ids_in_html and clip_urls_in_html:
-            st.info("🎯 Combinando IDs e URLs encontrados...")
-            unique_ids = list(set(clip_ids_in_html))[:max_videos]
+            for i, url_found in enumerate(clip_urls_in_html[:3]):
+                st.write(f"   {i+1}. {url_found}")
             
-            for i, clip_id in enumerate(unique_ids):
-                corresponding_url = None
-                for url in clip_urls_in_html:
-                    if clip_id in url:
-                        corresponding_url = url
-                        break
+            # PROCESSAR CADA URL ENCONTRADA
+            for i, clip_url in enumerate(clip_urls_in_html[:max_videos]):
                 
-                if not corresponding_url and clip_urls_in_html:
-                    corresponding_url = clip_urls_in_html[min(i, len(clip_urls_in_html)-1)]
-                
-                if corresponding_url:
-                    if corresponding_url.startswith('/'):
-                        full_url = urljoin('https://artlist.io', corresponding_url)
-                    else:
-                        full_url = corresponding_url
+                # 1. CONSTRUIR URL COMPLETA
+                if clip_url.startswith('/'):
+                    full_url = f"https://artlist.io{clip_url}"
                 else:
-                    full_url = f"https://artlist.io/stock-footage/clip/video-{clip_id}/{clip_id}"
+                    full_url = clip_url
                 
-                title = ""
-                if corresponding_url:
-                    url_parts = corresponding_url.split('/')
-                    for part in url_parts:
-                        if part and not part.isdigit() and len(part) > 5 and '-' in part:
-                            title = part.replace('-', ' ').title()
-                            break
+                # 2. EXTRAIR ID - SEMPRE DO FINAL DA URL
+                url_parts = full_url.rstrip('/').split('/')
+                video_id = "unknown"
                 
-                if not title:
-                    title = f"Artlist Clip {clip_id}"
-                
-                video_data = {
-                    'ID': str(clip_id),
-                    'Source': 'artlist.io',
-                    'Title': title,
-                    'Description': f"Clip extraído do HTML - ID: {clip_id}",
-                    'Video URL': full_url,
-                    'Thumbnail URL': generate_smart_thumbnail(title, full_url, clip_id),
-                    'Language': 'en'
-                }
-                
-                df_data.append(video_data)
-                st.success(f"✅ Vídeo {len(df_data)}: {title} (ID: {clip_id})")
-            
-            return df_data
-        
-        elif clip_urls_in_html:
-            st.info("🎯 Processando URLs encontradas...")
-            for i, url in enumerate(clip_urls_in_html[:max_videos]):
-                url_parts = url.rstrip('/').split('/')
-                video_id = None
+                # Pegar o último número da URL (método garantido)
                 for part in reversed(url_parts):
-                    if part.isdigit() and len(part) >= 4:
+                    if part.isdigit():
                         video_id = part
                         break
                 
-                if not video_id:
-                    video_id = f"extracted_{i}"
-                
-                title = ""
+                # 3. EXTRAIR TÍTULO - DA PARTE ANTES DO ID
+                title = "Untitled Video"
                 for part in url_parts:
-                    if part and not part.isdigit() and len(part) > 5 and '-' in part:
+                    if part and not part.isdigit() and len(part) > 10 and '-' in part:
+                        # Converter kebab-case para Title Case
                         title = part.replace('-', ' ').title()
                         break
                 
-                if url.startswith('/'):
-                    full_url = urljoin('https://artlist.io', url)
-                else:
-                    full_url = url
-                
+                # 4. CRIAR DADOS DO VÍDEO
                 video_data = {
-                    'ID': str(video_id),
+                    'ID': video_id,
                     'Source': 'artlist.io',
                     'Title': title,
-                    'Description': f"Extraído da URL: {full_url}",
+                    'Description': f"Video extracted from Artlist",
                     'Video URL': full_url,
                     'Thumbnail URL': generate_smart_thumbnail(title, full_url, video_id),
                     'Language': 'en'
@@ -369,68 +307,21 @@ def extract_with_requests(url, max_videos=20):
                 
                 df_data.append(video_data)
                 st.success(f"✅ Vídeo {len(df_data)}: {title} (ID: {video_id})")
+                
+                # DEBUG do primeiro vídeo
+                if len(df_data) == 1:
+                    st.info("🔍 **Primeiro vídeo extraído:**")
+                    st.info(f"   • URL original: {clip_url}")
+                    st.info(f"   • URL completa: {full_url}")
+                    st.info(f"   • ID extraído: {video_id}")
+                    st.info(f"   • Título extraído: {title}")
             
             return df_data
         
-        # Fallback: usar seletores CSS
-        video_selectors = [
-            '[data-testid*="clip"]',
-            '[data-testid*="video"]',
-            'div:has(a[href*="/clip/"])',
-            '[class*="clip"]',
-            '[class*="video"]',
-            'div:has(img):has(a)',
-            'article',
-            'div[class*="item"]'
-        ]
-        
-        video_elements = []
-        for selector in video_selectors:
-            try:
-                elements = soup.select(selector)
-                if elements:
-                    st.info(f"✅ Encontrados {len(elements)} elementos com seletor: {selector}")
-                    video_elements = elements[:max_videos * 2]
-                    break
-            except:
-                continue
-        
-        if not video_elements:
-            st.warning("⚠️ Usando fallback final...")
-            all_divs = soup.find_all(['div', 'article'])
-            for div in all_divs:
-                if div.find('a', href=True) or div.find('img'):
-                    video_elements.append(div)
-                if len(video_elements) >= max_videos:
-                    break
-        
-        st.info(f"🎯 Processando {len(video_elements)} elementos...")
-        
-        processed_count = 0
-        for i, element in enumerate(video_elements):
-            try:
-                video_data = extract_video_from_element(element, i)
-                
-                if video_data and (video_data.get('Title') or video_data.get('Video URL')):
-                    df_data.append(video_data)
-                    processed_count += 1
-                    
-                    if processed_count == 1:
-                        st.success("🔍 **Primeiro vídeo extraído:**")
-                        st.info(f"   • ID: {video_data.get('ID')}")
-                        st.info(f"   • URL: {video_data.get('Video URL')}")
-                        st.info(f"   • Título: {video_data.get('Title')}")
-                    
-                    st.success(f"✅ Vídeo {processed_count}: {video_data.get('Title', 'Sem título')[:50]}...")
-                    
-                    if processed_count >= max_videos:
-                        break
-                        
-            except Exception as e:
-                st.warning(f"⚠️ Erro ao processar elemento {i+1}: {e}")
-                continue
-        
-        return df_data
+        else:
+            st.warning("⚠️ Nenhuma URL de clip encontrada no HTML")
+            st.info("💡 Isso pode acontecer se o conteúdo for carregado via JavaScript")
+            return []
         
     except Exception as e:
         st.error(f"Erro na extração: {e}")
