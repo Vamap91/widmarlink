@@ -267,6 +267,28 @@ def extract_with_requests(url, max_videos=20):
             for i, url_found in enumerate(clip_urls_in_html[:3]):
                 st.write(f"   {i+1}. {url_found}")
             
+            # BUSCAR TÍTULOS NO HTML (método mais preciso)
+            # Padrões comuns de títulos no Artlist
+            title_patterns = [
+                r'<title>([^<]+)</title>',
+                r'"title"\s*:\s*"([^"]+)"',
+                r'<h1[^>]*>([^<]+)</h1>',
+                r'<h2[^>]*>([^<]+)</h2>',
+                r'Safari,\s*Africa,\s*Wildlife,\s*Vertical\s*Format[^"]*',
+                r'clip.*?title.*?"([^"]*Safari[^"]*)"',
+                r'Safari[^"<>]*Africa[^"<>]*Wildlife[^"<>]*Vertical[^"<>]*Format'
+            ]
+            
+            found_titles = []
+            for pattern in title_patterns:
+                matches = re.findall(pattern, response.text, re.IGNORECASE | re.DOTALL)
+                for match in matches:
+                    clean_title = re.sub(r'\s+', ' ', match.strip())
+                    if len(clean_title) > 5 and 'safari' in clean_title.lower():
+                        found_titles.append(clean_title)
+            
+            st.info(f"🏷️ Títulos encontrados: {found_titles[:3]}")
+            
             # PROCESSAR CADA URL ENCONTRADA
             for i, clip_url in enumerate(clip_urls_in_html[:max_videos]):
                 
@@ -286,13 +308,19 @@ def extract_with_requests(url, max_videos=20):
                         video_id = part
                         break
                 
-                # 3. EXTRAIR TÍTULO - DA PARTE ANTES DO ID
+                # 3. USAR TÍTULO ENCONTRADO NO HTML OU EXTRAIR DA URL
                 title = "Untitled Video"
-                for part in url_parts:
-                    if part and not part.isdigit() and len(part) > 10 and '-' in part:
-                        # Converter kebab-case para Title Case
-                        title = part.replace('-', ' ').title()
-                        break
+                
+                # Primeiro: usar título encontrado no HTML
+                if found_titles:
+                    title = found_titles[0]  # Usar o primeiro título válido encontrado
+                else:
+                    # Fallback: extrair da URL
+                    for part in url_parts:
+                        if part and not part.isdigit() and len(part) > 10 and '-' in part:
+                            # Converter kebab-case para Title Case
+                            title = part.replace('-', ' ').title()
+                            break
                 
                 # 4. CRIAR DADOS DO VÍDEO
                 video_data = {
@@ -315,6 +343,7 @@ def extract_with_requests(url, max_videos=20):
                     st.info(f"   • URL completa: {full_url}")
                     st.info(f"   • ID extraído: {video_id}")
                     st.info(f"   • Título extraído: {title}")
+                    st.info(f"   • Títulos encontrados no HTML: {found_titles[:2]}")
             
             return df_data
         
