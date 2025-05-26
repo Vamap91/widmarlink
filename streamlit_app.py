@@ -377,6 +377,12 @@ def extract_with_requests(url, max_videos=20):
                 st.success(f"✅ Vídeo {len(processed_videos)}: {title}")
         
         return processed_videos
+        
+    except Exception as e:
+        st.error(f"Erro na extração: {e}")
+        import traceback
+        st.error(f"Traceback: {traceback.format_exc()}")
+        return []
 
 def process_video_from_url(clip_url, index, html_content):
     """Processa um vídeo individual a partir da URL"""
@@ -440,13 +446,6 @@ def process_video_from_url(clip_url, index, html_content):
     except Exception as e:
         st.warning(f"Erro ao processar vídeo {index}: {e}")
         return None
-        return processed_videos
-        
-    except Exception as e:
-        st.error(f"Erro na extração: {e}")
-        import traceback
-        st.error(f"Traceback: {traceback.format_exc()}")
-        return []
 
 def main():
     st.markdown("### 🔧 Configurações")
