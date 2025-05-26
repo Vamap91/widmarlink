@@ -258,6 +258,42 @@ def extract_with_requests(url, max_videos=20):
         with st.expander("🔧 Debug - HTML (primeiros 2000 chars)"):
             st.text(response.text[:2000])
         
+        # VERIFICAR se a página carrega vídeos via JavaScript
+        if 'window.__INITIAL_STATE__' in response.text or 'window.__NEXT_DATA__' in response.text or '"videos"' in response.text:
+            st.info("🔄 Página usa carregamento JavaScript - tentando extrair dados...")
+            
+            # Buscar dados JSON embedados na página
+            js_data_patterns = [
+                r'window\.__INITIAL_STATE__\s*=\s*({.+?});',
+                r'window\.__NEXT_DATA__\s*=\s*({.+?});',
+                r'"videos"\s*:\s*(\[.+?\])',
+                r'"clips"\s*:\s*(\[.+?\])',
+                r'initialProps"\s*:\s*({.+?})'
+            ]
+            
+            extracted_data = []
+            for pattern in js_data_patterns:
+                try:
+                    matches = re.findall(pattern, response.text, re.DOTALL)
+                    for match in matches:
+                        try:
+                            data = json.loads(match)
+                            extracted_data.append(data)
+                            st.success(f"✅ Dados JSON encontrados! Tipo: {type(data)}")
+                        except:
+                            continue
+                except:
+                    continue
+            
+            # Processar dados JSON encontrados
+            if extracted_data:
+                return process_json_data(extracted_data, max_videos)
+        
+        else:
+            st.warning("⚠️ Página parece estática - processando HTML...")
+        
+        # CONTINUAR com método original se não encontrou JSON
+        
         # BUSCAR URLs de clips na página de grade - MÚLTIPLOS PADRÕES
         clip_urls_patterns = [
             r'href="([^"]*(?:/clip/|/stock-footage/clip/)[^"]*)"',  # Links diretos
@@ -489,6 +525,133 @@ def process_video_from_url(clip_url, index, html_content):
         
     except Exception as e:
         st.warning(f"Erro ao processar vídeo {index}: {e}")
+        return None
+
+def process_json_data(json_data_list, max_videos):
+    """Processa dados JSON extraídos da página"""
+    processed_videos = []
+    
+    try:
+        st.info("🎯 Processando dados JSON encontrados...")
+        
+        for data in json_data_list:
+            videos_found = []
+            
+            # Buscar vídeos em diferentes estruturas JSON
+            def find_videos_recursive(obj, path=""):
+                if isinstance(obj, dict):
+                    # Buscar chaves que podem conter vídeos
+                    for key, value in obj.items():
+                        if key.lower() in ['videos', 'clips', 'items', 'results', 'data']:
+                            if isinstance(value, list):
+                                videos_found.extend(value)
+                        else:
+                            find_videos_recursive(value, f"{path}.{key}")
+                elif isinstance(obj, list):
+                    for i, item in enumerate(obj):
+                        find_videos_recursive(item, f"{path}[{i}]")
+            
+            find_videos_recursive(data)
+            
+            st.info(f"📹 Encontrados {len(videos_found)} itens de vídeo no JSON")
+            
+            # Processar cada vídeo encontrado
+            for i, video_item in enumerate(videos_found[:max_videos]):
+                if len(processed_videos) >= max_videos:
+                    break
+                
+                try:
+                    # Extrair dados do objeto vídeo
+                    video_data = extract_video_from_json(video_item, i)
+                    if video_data:
+                        processed_videos.append(video_data)
+                        st.success(f"✅ Vídeo JSON {len(processed_videos)}: {video_data.get('Title', 'Sem título')}")
+                except Exception as e:
+                    st.warning(f"Erro ao processar vídeo JSON {i}: {e}")
+                    continue
+        
+        return processed_videos
+        
+    except Exception as e:
+        st.error(f"Erro ao processar dados JSON: {e}")
+        return []
+
+def extract_video_from_json(video_obj, index):
+    """Extrai dados de um objeto JSON de vídeo"""
+    try:
+        if not isinstance(video_obj, dict):
+            return None
+        
+        # Buscar ID em diferentes campos
+        video_id = (video_obj.get('id') or 
+                   video_obj.get('videoId') or 
+                   video_obj.get('clipId') or 
+                   video_obj.get('_id') or
+                   f"json_{index}")
+        
+        # Buscar título
+        title = (video_obj.get('title') or 
+                video_obj.get('name') or 
+                video_obj.get('alt') or
+                video_obj.get('description', '')[:50] or
+                f"Artlist Video {video_id}")
+        
+        # Buscar URL do vídeo
+        video_url = ""
+        url_fields = ['url', 'videoUrl', 'clipUrl', 'link', 'permalink', 'slug']
+        for field in url_fields:
+            if video_obj.get(field):
+                url = video_obj[field]
+                if isinstance(url, str):
+                    if url.startswith('/'):
+                        video_url = f"https://artlist.io{url}"
+                    elif 'artlist.io' in url:
+                        video_url = url
+                    elif url.startswith('http'):
+                        video_url = url
+                    break
+        
+        # Se não encontrou URL, construir baseada no ID
+        if not video_url and video_id:
+            slug = title.lower().replace(' ', '-').replace(',', '')[:50]
+            video_url = f"https://artlist.io/stock-footage/clip/{slug}/{video_id}"
+        
+        # Buscar thumbnail
+        thumbnail_url = ""
+        thumb_fields = ['thumbnail', 'thumbnailUrl', 'image', 'poster', 'preview']
+        for field in thumb_fields:
+            if video_obj.get(field):
+                thumb = video_obj[field]
+                if isinstance(thumb, str):
+                    if thumb.startswith('/'):
+                        thumbnail_url = f"https://artlist.io{thumb}"
+                    elif thumb.startswith('http'):
+                        thumbnail_url = thumb
+                    break
+        
+        # Se não encontrou thumbnail, gerar uma
+        if not thumbnail_url:
+            thumbnail_url = generate_smart_thumbnail(title, video_url, video_id)
+        
+        # Buscar descrição
+        description = (video_obj.get('description') or 
+                      video_obj.get('summary') or
+                      f"Video extracted from JSON data")
+        
+        video_data = {
+            'ID': str(video_id),
+            'Source': 'artlist.io',
+            'Title': title,
+            'Description': description[:200],  # Limitar tamanho
+            'Video URL': video_url,
+            'Thumbnail URL': thumbnail_url,
+            'Language': 'en'
+        }
+        
+        return video_data
+        
+    except Exception as e:
+        st.warning(f"Erro ao extrair vídeo do JSON: {e}")
         return None
 
 def main():
