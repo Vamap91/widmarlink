@@ -258,53 +258,80 @@ def extract_with_requests(url, max_videos=20):
         with st.expander("🔧 Debug - HTML (primeiros 2000 chars)"):
             st.text(response.text[:2000])
         
-        # BUSCAR URLs de clips na página de grade
-        clip_urls_in_html = re.findall(r'href="([^"]*(?:/clip/|/stock-footage/clip/)[^"]*)"', response.text)
+        # BUSCAR URLs de clips na página de grade - MÚLTIPLOS PADRÕES
+        clip_urls_patterns = [
+            r'href="([^"]*(?:/clip/|/stock-footage/clip/)[^"]*)"',  # Links diretos
+            r'["\']([^"\']*(?:/clip/|/stock-footage/clip/)[^"\']*)["\']',  # JavaScript
+            r'to="([^"]*(?:/clip/|/stock-footage/clip/)[^"]*)"',  # Router links
+            r'pathname["\s]*:["\s]*["\']([^"\']*(?:/clip/|/stock-footage/clip/)[^"\']*)["\']'  # Pathname configs
+        ]
         
-        # BUSCAR também por padrões de URLs que podem estar em formato JavaScript
-        js_urls = re.findall(r'["\']([^"\']*(?:/clip/|/stock-footage/clip/)[^"\']*)["\']', response.text)
-        clip_urls_in_html.extend(js_urls)
+        clip_urls_in_html = []
+        for pattern in clip_urls_patterns:
+            urls = re.findall(pattern, response.text)
+            clip_urls_in_html.extend(urls)
         
-        # BUSCAR por IDs de vídeo que podem estar em data attributes
-        video_ids_in_html = re.findall(r'data-(?:video-)?id["\s]*=["\']\s*(\d{6,8})["\']', response.text)
+        # BUSCAR por IDs de vídeo em diferentes formatos
+        video_ids_patterns = [
+            r'data-(?:video-)?id["\s]*=["\']\s*(\d{6,8})["\']',  # data-id
+            r'"id"\s*:\s*["\']?(\d{6,8})["\']?',  # JSON id
+            r'videoId["\s]*:["\s]*["\']?(\d{6,8})["\']?',  # videoId
+            r'clipId["\s]*:["\s]*["\']?(\d{6,8})["\']?',  # clipId
+            r'/(\d{6,8})(?:["\s/]|$)'  # Números de 6-8 dígitos em URLs
+        ]
         
-        # Remover duplicatas
-        clip_urls_in_html = list(set(clip_urls_in_html))
-        video_ids_in_html = list(set(video_ids_in_html))
+        video_ids_in_html = []
+        for pattern in video_ids_patterns:
+            ids = re.findall(pattern, response.text)
+            video_ids_in_html.extend(ids)
+        
+        # Remover duplicatas e limpar
+        clip_urls_in_html = list(set([url for url in clip_urls_in_html if url and len(url) > 5]))
+        video_ids_in_html = list(set([vid for vid in video_ids_in_html if vid and len(vid) >= 6]))
         
         st.info(f"🔍 URLs de clips encontradas: {len(clip_urls_in_html)}")
         st.info(f"🆔 IDs de vídeo encontrados: {len(video_ids_in_html)}")
         
-        if clip_urls_in_html:
-            st.success("✅ Links de vídeo encontrados!")
-            for i, url_found in enumerate(clip_urls_in_html[:5]):
-                st.write(f"   {i+1}. {url_found}")
-        
-        if video_ids_in_html:
-            st.success("✅ IDs de vídeo encontrados!")
-            for i, video_id in enumerate(video_ids_in_html[:5]):
-                st.write(f"   {i+1}. ID: {video_id}")
-        
-        # BUSCAR TÍTULOS/ALT TEXT das imagens na grade
+        # BUSCAR DADOS DE IMAGENS/VÍDEOS na grade
+        # Padrões mais amplos para páginas iniciais
         img_data = []
-        img_pattern = r'<img[^>]*(?:alt="([^"]*)"[^>]*src="([^"]*)"(?:[^>]*data-id="([^"]*)")?|src="([^"]*)"[^>]*alt="([^"]*)"(?:[^>]*data-id="([^"]*)")?)'
-        img_matches = re.findall(img_pattern, response.text)
         
-        for match in img_matches:
-            alt_text = match[0] or match[4] or ""
-            src = match[1] or match[3] or ""
-            data_id = match[2] or match[5] or ""
+        # Buscar tags img com dados relevantes
+        img_elements = soup.find_all('img')
+        for img in img_elements:
+            src = img.get('src', '')
+            alt = img.get('alt', '')
+            data_id = img.get('data-id', '') or img.get('id', '')
             
-            if src and ('artlist' in src.lower() or src.startswith('/')):
+            # Filtrar apenas imagens que parecem ser de vídeos
+            if (src and ('artlist' in src.lower() or src.startswith('/')) and 
+                (alt or data_id or 'video' in src.lower() or 'clip' in src.lower())):
                 img_data.append({
-                    'alt': alt_text,
+                    'alt': alt,
                     'src': src,
-                    'id': data_id
+                    'id': data_id,
+                    'parent_classes': ' '.join(img.parent.get('class', []) if img.parent else [])
                 })
         
-        st.info(f"🖼️ Imagens com dados encontradas: {len(img_data)}")
+        st.info(f"🖼️ Imagens relevantes encontradas: {len(img_data)}")
         
-        # PROCESSAR VÍDEOS DA GRADE
+        # DEBUG: Mostrar alguns dados encontrados
+        if clip_urls_in_html:
+            st.success("✅ URLs encontradas!")
+            for i, url in enumerate(clip_urls_in_html[:3]):
+                st.write(f"   {i+1}. {url}")
+        
+        if video_ids_in_html:
+            st.success("✅ IDs encontrados!")
+            for i, vid_id in enumerate(video_ids_in_html[:5]):
+                st.write(f"   {i+1}. ID: {vid_id}")
+        
+        if img_data:
+            st.success("✅ Dados de imagem encontrados!")
+            for i, img in enumerate(img_data[:3]):
+                st.write(f"   {i+1}. Alt: '{img['alt'][:30]}...', Src: {img['src'][:50]}...")
+        
+        # PROCESSAR VÍDEOS DA GRADE - PRIORIDADE POR MÉTODO
         processed_videos = []
         
         # Método 1: Se encontrou URLs de clips
@@ -348,33 +375,50 @@ def extract_with_requests(url, max_videos=20):
                 processed_videos.append(video_data)
                 st.success(f"✅ Vídeo {len(processed_videos)}: {title} (ID: {video_id})")
         
-        # Método 3: Fallback - usar dados das imagens
-        elif img_data:
-            st.info("🎯 Processando vídeos através das imagens encontradas...")
+        # Método 4: FALLBACK AGRESSIVO - buscar qualquer coisa que pareça vídeo
+        else:
+            st.warning("⚠️ Usando método de fallback - busca agressiva...")
             
-            for i, img in enumerate(img_data[:max_videos]):
-                video_id = img.get('id') or f"img_{i}"
-                title = img.get('alt') or f"Artlist Video {i+1}"
-                thumbnail = img.get('src', '')
-                
-                if thumbnail.startswith('/'):
-                    thumbnail = f"https://artlist.io{thumbnail}"
-                
-                # Tentar construir URL do vídeo
-                video_url = f"https://artlist.io/stock-footage/clip/{title.lower().replace(' ', '-')}/{video_id}"
-                
-                video_data = {
-                    'ID': video_id,
-                    'Source': 'artlist.io',
-                    'Title': title,
-                    'Description': f"Video extracted from image data",
-                    'Video URL': video_url,
-                    'Thumbnail URL': thumbnail if thumbnail else generate_smart_thumbnail(title, video_url, video_id),
-                    'Language': 'en'
-                }
-                
-                processed_videos.append(video_data)
-                st.success(f"✅ Vídeo {len(processed_videos)}: {title}")
+            # Buscar por qualquer número que possa ser ID de vídeo
+            all_numbers = re.findall(r'\b(\d{6,8})\b', response.text)
+            potential_ids = list(set(all_numbers))[:max_videos]
+            
+            st.info(f"🔢 Números encontrados que podem ser IDs: {len(potential_ids)}")
+            
+            if potential_ids:
+                for i, potential_id in enumerate(potential_ids):
+                    # Construir dados básicos
+                    title = f"Artlist Video {potential_id}"
+                    video_url = f"https://artlist.io/stock-footage/clip/video-{potential_id}/{potential_id}"
+                    
+                    # Tentar encontrar contexto para este ID
+                    context_pattern = rf'.{{0,100}}{re.escape(potential_id)}.{{0,100}}'
+                    context_matches = re.findall(context_pattern, response.text)
+                    
+                    if context_matches:
+                        # Tentar extrair título do contexto
+                        for context in context_matches:
+                            title_match = re.search(r'"([^"]{10,60})"', context)
+                            if title_match and 'http' not in title_match.group(1):
+                                title = title_match.group(1)
+                                break
+                    
+                    video_data = {
+                        'ID': potential_id,
+                        'Source': 'artlist.io',
+                        'Title': title,
+                        'Description': f"Video discovered via fallback method",
+                        'Video URL': video_url,
+                        'Thumbnail URL': generate_smart_thumbnail(title, video_url, potential_id),
+                        'Language': 'en'
+                    }
+                    
+                    processed_videos.append(video_data)
+                    st.success(f"✅ Vídeo {len(processed_videos)}: {title} (ID: {potential_id})")
+            
+            else:
+                st.error("❌ Nenhum padrão de vídeo encontrado na página")
+                st.info("💡 Tente com uma URL específica de busca do Artlist")
         
         return processed_videos
         
